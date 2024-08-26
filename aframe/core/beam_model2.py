@@ -295,6 +295,73 @@ class Frame:
         # if len(self.beams) - num_bc > len(self.joints): # check kinematic constraints
         #     raise Exception('Error: not enough kinematic constraints')
     
+    def compute_stiffness_matrix(self):
+        # check for input errors
+        self._errors()
+        
+        # automated beam node assignment
+        node_dictionary = {}
+
+        # start by populating the nodes dictionary without joints
+        val = 0
+        for beam in self.beams:
+            node_dictionary[beam.name] = np.arange(val, val + beam.num_nodes)
+            val += beam.num_nodes
+
+        # assign nodal indices in the global system with joints
+        for joint in self.joints:
+            joint_beams, joint_nodes = joint['beams'], joint['nodes']
+            node_a = node_dictionary[joint_beams[0].name][joint_nodes[0]]
+            for i, beam in enumerate(joint_beams):
+                if i != 0: node_dictionary[beam.name][joint_nodes[i]] = node_a
+
+        # helpers
+        node_set = set()
+        for beam in self.beams:
+            for i in range(beam.num_nodes):
+                node_set.add(node_dictionary[beam.name][i])
+
+        num_unique_nodes = len(node_set)
+        dimension = num_unique_nodes * 6
+
+        index = {list(node_set)[i]: i for i in range(num_unique_nodes)}
+
+        # construct the global stiffness and mass matrices
+        K = csdl.Variable(value=np.zeros((dimension, dimension)))
+
+        transformations_storage, local_stiffness_storage = [], []
+
+        for beam in self.beams:
+
+            lengths = self._utils(beam)
+
+            beam_transforms = self._transforms(beam, lengths)
+            transformations_storage.append(beam_transforms)
+
+            beam_stiffness, element_stiffness = self._stiffness_matrix(beam,
+                                                                    beam_transforms, 
+                                                                    dimension, 
+                                                                    index, 
+                                                                    node_dictionary,
+                                                                    lengths)
+            K += beam_stiffness
+            local_stiffness_storage.append(element_stiffness)
+
+
+        # boundary conditions
+        for beam in self.beams:
+            for bc in beam.bc:
+                node, dof = bc['node'], bc['dof']
+                node_index = index[node_dictionary[beam.name][node]] * 6
+
+                for i in range(6):
+                    if dof[i] == 1:
+                        # zero the row/column then put a 1 in the diagonal
+                        K = K.set(csdl.slice[node_index + i, :], 0) # row
+                        K = K.set(csdl.slice[:, node_index + i], 0) # column
+                        K = K.set(csdl.slice[node_index + i, node_index + i], 1)
+
+        return K
 
 
     def evaluate(
